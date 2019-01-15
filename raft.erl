@@ -569,21 +569,21 @@ ld_3_test_() ->
                    ?assertEqual(2,get_commit_index(m3))
              ])).
 
-%% % in this case the commit index updates for 1, because 2/3 get the
-%% % message.  But it does not update for 2, because only 1/3 get the
-%% % message.
-%% ld_4_test_() ->
-%%     testme(?_test([make_leader(m1),
-%%                    disable_member(m2),
-%%                    new_entry(m1, cool_data),
-%%                    timer:sleep(10),
-%%                    ?assertEqual(1,get_commit_index(m1)),
-%%                    ?assertEqual(1,get_commit_index(m3)),
-%%                    disable_member(m3),
-%%                    new_entry(m1, cool_data2),
-%%                    timer:sleep(10),
-%%                    ?assertEqual(1,get_commit_index(m1))
-%%              ])).
+% in this case the commit index updates for 1, because 2/3 get the
+% message.  But it does not update for 2, because only 1/3 get the
+% message.
+ld_4_test_() ->
+    testme(?_test([make_leader(m1),
+                   disable_member(m2),
+                   new_entry(m1, cool_data),
+                   timer:sleep(10),
+                   ?assertEqual(1,get_commit_index(m1)),
+                   ?assertEqual(1,get_commit_index(m3)),
+                   disable_member(m3),
+                   new_entry(m1, cool_data2),
+                   timer:sleep(10),
+                   ?assertEqual(1,get_commit_index(m1))
+             ])).
 
 %%%%%%%%%%%%%%%%%%%
 %% PART 4: Leader Recovery (20 points)
