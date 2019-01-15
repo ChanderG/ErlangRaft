@@ -7,7 +7,8 @@
 	     log = [],
 	     term = 0,
 	     commitindex = 0,
-	     peers = []
+	     peers = [],
+	     nextIndex = [] % index of the last acked message on each peer
 	    }).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -112,12 +113,21 @@ raft_node_become_leader(NS) ->
 raft_node_leader_add_entry(NS, NewEntryData) ->
     % prepare entries
     Entries = [{NS#ns.term, NewEntryData}],
+    NewLog = NS#ns.log ++ Entries,
     % get prev log index and term
     {PrevLogIndex, PrevLogTerm} = helper_compute_prevlogterm(NS#ns.log),
     % send messages to all other peers -> blocking call
-    Responses = lists:map(fun(P) ->
-			  element(2, append_entries(P, NS#ns.term, PrevLogIndex, PrevLogTerm, Entries, NS#ns.commitindex))
-		  end, NS#ns.peers),
+    Responses = lists:map(fun({P, NextIndexP}) ->
+				  case NextIndexP of
+				      0 -> element(2, append_entries(P, NS#ns.term, 0, 0, NS#ns.log ++ Entries, NS#ns.commitindex));
+				      X -> element(2, append_entries(P, NS#ns.term, X, element(1, lists:nth(X, NS#ns.log)), lists:nthtail(X, NS#ns.log) ++ Entries, NS#ns.commitindex))
+				  end
+		  end, lists:zip(NS#ns.peers, NS#ns.nextIndex)),
+    NewNextIndex = lists:map(fun({NI, R}) -> case R of
+				    true -> length(NewLog);
+				    false -> NI
+				end
+			     end, lists:zip(NS#ns.nextIndex, Responses)),
     % check for the number of responses needed
     ResponsesNeeded = ceil((length(NS#ns.peers)+1)/2),
     ResponsesGot = length(lists:filter(fun(R) -> R == true end, Responses))+1,
@@ -128,7 +138,6 @@ raft_node_leader_add_entry(NS, NewEntryData) ->
        ResponsesGot >= ResponsesNeeded ->
 	    io:format("Got enough responses ~n"),
 	    % update local copy
-	    NewLog = NS#ns.log ++ Entries,
 	    % new commitindex
 	    NewCommitIndex = length(NewLog),
 	    {NewPrevLogIndex, NewPrevLogTerm} = helper_compute_prevlogterm(NewLog),
@@ -136,7 +145,7 @@ raft_node_leader_add_entry(NS, NewEntryData) ->
 	    lists:foreach(fun(P) ->
 				append_entries(P, NS#ns.term, NewPrevLogIndex, NewPrevLogTerm, [], NewCommitIndex)
 			end, NS#ns.peers),
-	    NS#ns{log=NewLog, commitindex=NewCommitIndex}
+	    NS#ns{log=NewLog, commitindex=NewCommitIndex, nextIndex=NewNextIndex}
     end.
 
 %% In this assignment, we're going to be implmenting part of the Raft
@@ -510,7 +519,7 @@ make_leader(Id) ->
 % members should be initalized to know about each other.
 start_raft_members(ListOfUniqueIds) ->
     lists:foreach(fun(N)->
-		    register(N, spawn(raft, raft_node, [#ns{name=N, peers=lists:delete(N, ListOfUniqueIds)}]))
+		    register(N, spawn(raft, raft_node, [#ns{name=N, peers=lists:delete(N, ListOfUniqueIds), nextIndex=[0 || _ <- lists:seq(1, length(ListOfUniqueIds) - 1)]}]))
 		  end,ListOfUniqueIds).
 
 
@@ -594,29 +603,29 @@ ld_4_test_() ->
 % leader should remember what was acknowledged and send the data it
 % thinks the service is missing until it gets acknowledged.
 
-%% % HINT: when I worked on this, I discovered a bug that my leader was
-%% % always sending the complete datastore with every append call,
-%% % without correctly updating which services had which data.  This was
-%% % hard to detect, because the followers would accept this (as protocol
-%% % dictates they should).  So add some erlang:displays and make sure
-%% % your code is working right!
-%% ld_5_test_() ->
-%%     testme(?_test([make_leader(m1),
-%%                    new_entry(m1, cool_data),
-%%                    timer:sleep(10),
-%%                    disable_member(m3),
-%%                    new_entry(m1, cool_data2),
-%%                    timer:sleep(10),
-%%                    enable_member(m3),
-%%                    new_entry(m1, cool_data3),
-%%                    timer:sleep(10),
-%%                    ?assertEqual([{1,cool_data},{1,cool_data2},{1,cool_data3}],get_log(m1)),
-%%                    ?assertEqual([{1,cool_data},{1,cool_data2},{1,cool_data3}],get_log(m2)),
-%%                    ?assertEqual([{1,cool_data},{1,cool_data2},{1,cool_data3}],get_log(m3)),
-%%                    ?assertEqual(3,get_commit_index(m1)),
-%%                    ?assertEqual(3,get_commit_index(m2)),
-%%                    ?assertEqual(3,get_commit_index(m3))
-%%              ])).
+% HINT: when I worked on this, I discovered a bug that my leader was
+% always sending the complete datastore with every append call,
+% without correctly updating which services had which data.  This was
+% hard to detect, because the followers would accept this (as protocol
+% dictates they should).  So add some erlang:displays and make sure
+% your code is working right!
+ld_5_test_() ->
+    testme(?_test([make_leader(m1),
+                   new_entry(m1, cool_data),
+                   timer:sleep(10),
+                   disable_member(m3),
+                   new_entry(m1, cool_data2),
+                   timer:sleep(10),
+                   enable_member(m3),
+                   new_entry(m1, cool_data3),
+                   timer:sleep(10),
+                   ?assertEqual([{1,cool_data},{1,cool_data2},{1,cool_data3}],get_log(m1)),
+                   ?assertEqual([{1,cool_data},{1,cool_data2},{1,cool_data3}],get_log(m2)),
+                   ?assertEqual([{1,cool_data},{1,cool_data2},{1,cool_data3}],get_log(m3)),
+                   ?assertEqual(3,get_commit_index(m1)),
+                   ?assertEqual(3,get_commit_index(m2)),
+                   ?assertEqual(3,get_commit_index(m3))
+             ])).
 
 % Now cosider the case where a follower is offline and a leader switch
 % occured.  The new data will be rejected by the client until a place
