@@ -6,7 +6,9 @@
 -record(ns, {name,
 	     log = [],
 	     term = 0,
-	     commitindex = 0}).
+	     commitindex = 0,
+	     peers = []
+	    }).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% PART 0: The actual raft node code
@@ -35,7 +37,11 @@ raft_node(NS) ->
 	{getcommitindex, Sender} ->
 	    Sender ! {getcommitindex, Name, NS#ns.commitindex};
 	{appendentries, Sender, AppendEntriesArgs} ->
-	    raft_node(raft_node_append_entries(NS, Sender, AppendEntriesArgs))
+	    raft_node(raft_node_append_entries(NS, Sender, AppendEntriesArgs));
+	{makeleader, Sender} ->
+	    raft_node(raft_node_become_leader(NS));
+	{newentry, Sender, NewEntryData} ->
+	    raft_node(raft_node_leader_add_entry(NS, NewEntryData))
     end,
     raft_node(NS).
 
@@ -88,6 +94,51 @@ raft_node_append_entries(NS, Sender, {Term, PrevLogIndex, PrevLogTerm, Entries, 
 	    NS#ns{log=NewLog, term=Term, commitindex=NewCommitIndex}
     end.
 
+% helper to manage empty log case
+helper_compute_prevlogterm(Log) ->
+    case length(Log) of
+	0 -> {0, 0};
+	X -> {X, element(1, lists:last(Log))}
+    end.
+
+raft_node_become_leader(NS) ->
+    NewTerm = NS#ns.term + 1,
+    {PrevLogIndex, PrevLogTerm} = helper_compute_prevlogterm(NS#ns.log),
+    lists:foreach(fun(P) ->
+			append_entries(P, NewTerm, PrevLogIndex, PrevLogTerm, [], NS#ns.commitindex)
+		  end, NS#ns.peers),
+    NS#ns{term=NewTerm}.
+
+raft_node_leader_add_entry(NS, NewEntryData) ->
+    % prepare entries
+    Entries = [{NS#ns.term, NewEntryData}],
+    % get prev log index and term
+    {PrevLogIndex, PrevLogTerm} = helper_compute_prevlogterm(NS#ns.log),
+    % send messages to all other peers -> blocking call
+    Responses = lists:map(fun(P) ->
+			  element(2, append_entries(P, NS#ns.term, PrevLogIndex, PrevLogTerm, Entries, NS#ns.commitindex))
+		  end, NS#ns.peers),
+    % check for the number of responses needed
+    ResponsesNeeded = ceil((length(NS#ns.peers)+1)/2),
+    ResponsesGot = length(lists:filter(fun(R) -> R == true end, Responses))+1,
+    if ResponsesGot < ResponsesNeeded ->
+	    % not enough, cancel call
+	    io:format("Not enough responses, cancel call ~n"),
+	    NS;
+       ResponsesGot >= ResponsesNeeded ->
+	    io:format("Got enough responses ~n"),
+	    % update local copy
+	    NewLog = NS#ns.log ++ Entries,
+	    % new commitindex
+	    NewCommitIndex = length(NewLog),
+	    {NewPrevLogIndex, NewPrevLogTerm} = helper_compute_prevlogterm(NewLog),
+	    % message everyone of the new commitindex -> again blocking
+	    lists:foreach(fun(P) ->
+				append_entries(P, NS#ns.term, NewPrevLogIndex, NewPrevLogTerm, [], NewCommitIndex)
+			end, NS#ns.peers),
+	    NS#ns{log=NewLog, commitindex=NewCommitIndex}
+    end.
+
 %% In this assignment, we're going to be implmenting part of the Raft
 %% algorythm - a distributed consensious reaching algorithm, designed
 %% to be simpler to understand than the more complex Paxos algorithm.
@@ -131,12 +182,7 @@ start_raft_member(UniqueId) ->
 
 setup() ->
     start_raft_member(raft1),
-    %% start_raft_members([m1,m2,m3]).
-    % start independently for now
-    start_raft_member(m1),
-    start_raft_member(m2),
-    start_raft_member(m3).
-
+    start_raft_members([m1,m2,m3]).
 
 cleanup(_) ->
     exit(whereis(raft1),kill),
@@ -289,8 +335,10 @@ append_entries(Id,
                LeaderCommit) ->
     Id ! {appendentries, self(), {Term, PrevLogIndex, PrevLogTerm, Entries, LeaderCommit}},
     receive
-	{appendentries, Id, ReturnTerm, Success} ->
-	     {ReturnTerm, Success}
+    	{appendentries, Id, ReturnTerm, Success} ->
+    	     {ReturnTerm, Success}
+    after 500 ->
+	    {invalidterm, false}
     end.
 
 % case 1: term is higher, prevs match, so data is added
@@ -456,19 +504,21 @@ ae_hist5_test_() ->
 % some process a leader that could not normally be elected could cause
 % data to be lost.
 make_leader(Id) ->
-    solveme.
+    Id ! {makeleader, self()}.
 
 % This is the equivalent of start_raft_member, except all the raft
 % members should be initalized to know about each other.
 start_raft_members(ListOfUniqueIds) ->
-    solveme.
+    lists:foreach(fun(N)->
+		    register(N, spawn(raft, raft_node, [#ns{name=N, peers=lists:delete(N, ListOfUniqueIds)}]))
+		  end,ListOfUniqueIds).
 
 
-%% ld_1_test_() ->
-%%     testme(?_test([make_leader(m1), % should send message to others updating their term
-%%                    timer:sleep(10),
-%%                    ?assertEqual(1,get_term(m2))
-%%              ])).
+ld_1_test_() ->
+    testme(?_test([make_leader(m1), % should send message to others updating their term
+                   timer:sleep(10),
+                   ?assertEqual(1,get_term(m2))
+             ])).
 
 % Now write a function called new_entry.  This is the way external
 % users will add an entry into the system.  This message will be sent
@@ -484,40 +534,40 @@ start_raft_members(ListOfUniqueIds) ->
 % will work fine for us in this regard.
 
 new_entry(Id, NewEntryData) ->
-    solveme.
+    Id ! {newentry, self(), NewEntryData}.
 
-%% ld_2_test_() ->
-%%     testme(?_test([make_leader(m1),
-%%                    new_entry(m1, cool_data),
-%%                    timer:sleep(10), % waiting, because you might not have gotten completely replicated
-%%                    ?assertEqual([{1,cool_data}],get_log(m1)),
-%%                    ?assertEqual([{1,cool_data}],get_log(m2)),
-%%                    ?assertEqual([{1,cool_data}],get_log(m3)),
-%%                    new_entry(m1, cool_data2),
-%%                    timer:sleep(10),
-%%                    ?assertEqual([{1,cool_data},{1,cool_data2}],get_log(m1)),
-%%                    ?assertEqual([{1,cool_data},{1,cool_data2}],get_log(m2)),
-%%                    ?assertEqual([{1,cool_data},{1,cool_data2}],get_log(m3))
-%%             ])).
+ld_2_test_() ->
+    testme(?_test([make_leader(m1),
+                   new_entry(m1, cool_data),
+                   timer:sleep(10), % waiting, because you might not have gotten completely replicated
+                   ?assertEqual([{1,cool_data}],get_log(m1)),
+                   ?assertEqual([{1,cool_data}],get_log(m2)),
+                   ?assertEqual([{1,cool_data}],get_log(m3)),
+                   new_entry(m1, cool_data2),
+                   timer:sleep(10),
+                   ?assertEqual([{1,cool_data},{1,cool_data2}],get_log(m1)),
+                   ?assertEqual([{1,cool_data},{1,cool_data2}],get_log(m2)),
+                   ?assertEqual([{1,cool_data},{1,cool_data2}],get_log(m3))
+            ])).
 
 % On to handling the commit index.  Once greater that 50% of the
 % members reply, the system should consider the new entry committed,
 % update its own commit index, and send an update to all members to
 % update theirs.
 
-%% ld_3_test_() ->
-%%     testme(?_test([make_leader(m1),
-%%                    new_entry(m1, cool_data),
-%%                    timer:sleep(10),
-%%                    ?assertEqual(1,get_commit_index(m1)),
-%%                    ?assertEqual(1,get_commit_index(m2)),
-%%                    ?assertEqual(1,get_commit_index(m3)),
-%%                    new_entry(m1, cool_data2),
-%%                    timer:sleep(10),
-%%                    ?assertEqual(2,get_commit_index(m1)),
-%%                    ?assertEqual(2,get_commit_index(m2)),
-%%                    ?assertEqual(2,get_commit_index(m3))
-%%              ])).
+ld_3_test_() ->
+    testme(?_test([make_leader(m1),
+                   new_entry(m1, cool_data),
+                   timer:sleep(10),
+                   ?assertEqual(1,get_commit_index(m1)),
+                   ?assertEqual(1,get_commit_index(m2)),
+                   ?assertEqual(1,get_commit_index(m3)),
+                   new_entry(m1, cool_data2),
+                   timer:sleep(10),
+                   ?assertEqual(2,get_commit_index(m1)),
+                   ?assertEqual(2,get_commit_index(m2)),
+                   ?assertEqual(2,get_commit_index(m3))
+             ])).
 
 %% % in this case the commit index updates for 1, because 2/3 get the
 %% % message.  But it does not update for 2, because only 1/3 get the
