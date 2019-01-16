@@ -108,7 +108,30 @@ raft_node_become_leader(NS) ->
     lists:foreach(fun(P) ->
 			append_entries(P, NewTerm, PrevLogIndex, PrevLogTerm, [], NS#ns.commitindex)
 		  end, NS#ns.peers),
-    NS#ns{term=NewTerm}.
+    NewNextIndex = [PrevLogIndex || _ <- NS#ns.peers],
+    NS#ns{term=NewTerm, nextIndex=NewNextIndex}.
+
+leader_bring_peer_upto_speed(P, NextIndexP, NS, Entries) ->
+    % contact peer once
+    RetVal = case NextIndexP of
+		 0 -> element(2, append_entries(P, NS#ns.term, 0, 0, NS#ns.log ++ Entries, NS#ns.commitindex));
+		 X -> element(2, append_entries(P, NS#ns.term, X, element(1, lists:nth(X, NS#ns.log)), lists:nthtail(X, NS#ns.log) ++ Entries, NS#ns.commitindex))
+	     end,
+    case {RetVal, NextIndexP} of
+	{true, _} ->
+	    RetVal;
+	{false, 0} ->
+	    false;
+	{false, _} ->
+	    % meaning, the log history diverges at somepoint back in history, we need to go back to that.
+	    leader_bring_peer_upto_speed(P, NextIndexP-1, NS, Entries)
+    end.
+
+% try lower and lower indexes as long as we get false responses back
+raft_node_leader_bring_peers_upto_speed(NS, Entries) ->
+    lists:map(fun({P, NextIndexP}) ->
+		      leader_bring_peer_upto_speed(P, NextIndexP, NS, Entries)
+	      end, lists:zip(NS#ns.peers, NS#ns.nextIndex)).
 
 raft_node_leader_add_entry(NS, NewEntryData) ->
     % prepare entries
@@ -117,12 +140,7 @@ raft_node_leader_add_entry(NS, NewEntryData) ->
     % get prev log index and term
     {PrevLogIndex, PrevLogTerm} = helper_compute_prevlogterm(NS#ns.log),
     % send messages to all other peers -> blocking call
-    Responses = lists:map(fun({P, NextIndexP}) ->
-				  case NextIndexP of
-				      0 -> element(2, append_entries(P, NS#ns.term, 0, 0, NS#ns.log ++ Entries, NS#ns.commitindex));
-				      X -> element(2, append_entries(P, NS#ns.term, X, element(1, lists:nth(X, NS#ns.log)), lists:nthtail(X, NS#ns.log) ++ Entries, NS#ns.commitindex))
-				  end
-		  end, lists:zip(NS#ns.peers, NS#ns.nextIndex)),
+    Responses = raft_node_leader_bring_peers_upto_speed(NS, Entries),
     NewNextIndex = lists:map(fun({NI, R}) -> case R of
 				    true -> length(NewLog);
 				    false -> NI
@@ -346,7 +364,7 @@ append_entries(Id,
     receive
     	{appendentries, Id, ReturnTerm, Success} ->
     	     {ReturnTerm, Success}
-    after 500 ->
+    after 10 ->
 	    {invalidterm, false}
     end.
 
@@ -634,51 +652,51 @@ ld_5_test_() ->
 % very specific algorithm for this - be sure to follow it and not
 % develop one of your own.
 
-%% ld_6_test_() ->
-%%     testme(?_test([make_leader(m1),
-%%                    new_entry(m1, cool_data),
-%%                    timer:sleep(10),
-%%                    disable_member(m3),
-%%                    new_entry(m1, cool_data2),
-%%                    timer:sleep(10),
-%%                    make_leader(m2),
-%%                    timer:sleep(10),
-%%                    enable_member(m3),
-%%                    new_entry(m2, cool_data3),
-%%                    timer:sleep(10),
-%%                    ?assertEqual([{1,cool_data},{1,cool_data2},{2,cool_data3}],get_log(m1)),
-%%                    ?assertEqual([{1,cool_data},{1,cool_data2},{2,cool_data3}],get_log(m2)),
-%%                    ?assertEqual([{1,cool_data},{1,cool_data2},{2,cool_data3}],get_log(m3)),
-%%                    ?assertEqual(3,get_commit_index(m1)),
-%%                    ?assertEqual(3,get_commit_index(m2)),
-%%                    ?assertEqual(3,get_commit_index(m3))
-%%              ])).
+ld_6_test_() ->
+    testme(?_test([make_leader(m1),
+                   new_entry(m1, cool_data),
+                   timer:sleep(10),
+                   disable_member(m3),
+                   new_entry(m1, cool_data2),
+                   timer:sleep(10),
+                   make_leader(m2),
+                   timer:sleep(10),
+                   enable_member(m3),
+                   new_entry(m2, cool_data3),
+                   timer:sleep(10),
+                   ?assertEqual([{1,cool_data},{1,cool_data2},{2,cool_data3}],get_log(m1)),
+                   ?assertEqual([{1,cool_data},{1,cool_data2},{2,cool_data3}],get_log(m2)),
+                   ?assertEqual([{1,cool_data},{1,cool_data2},{2,cool_data3}],get_log(m3)),
+                   ?assertEqual(3,get_commit_index(m1)),
+                   ?assertEqual(3,get_commit_index(m2)),
+                   ?assertEqual(3,get_commit_index(m3))
+             ])).
 
 % A case where shutdown member has some bogus data
 
-%% ld_7_test_() ->
-%%     testme(?_test([make_leader(m1),
-%%                    timer:sleep(10),
-%%                    disable_member(m2),
-%%                    disable_member(m3),
-%%                    new_entry(m1, cool_data),
-%%                    disable_member(m1),
-%%                    enable_member(m2),
-%%                    enable_member(m3),
-%%                    make_leader(m2),
-%%                    new_entry(m2, cool_data2),
-%%                    timer:sleep(10),
-%%                    enable_member(m1),
-%%                    new_entry(m2, cool_data3),
-%%                    timer:sleep(10),
-%%                    timer:sleep(10),
-%%                    ?assertEqual([{2,cool_data2},{2,cool_data3}],get_log(m1)),
-%%                    ?assertEqual([{2,cool_data2},{2,cool_data3}],get_log(m2)),
-%%                    ?assertEqual([{2,cool_data2},{2,cool_data3}],get_log(m3)),
-%%                    ?assertEqual(2,get_commit_index(m1)),
-%%                    ?assertEqual(2,get_commit_index(m2)),
-%%                    ?assertEqual(2,get_commit_index(m3))
-%%              ])).
+ld_7_test_() ->
+    testme(?_test([make_leader(m1),
+                   timer:sleep(10),
+                   disable_member(m2),
+                   disable_member(m3),
+                   new_entry(m1, cool_data),
+                   disable_member(m1),
+                   enable_member(m2),
+                   enable_member(m3),
+                   make_leader(m2),
+                   new_entry(m2, cool_data2),
+                   timer:sleep(10),
+                   enable_member(m1),
+                   new_entry(m2, cool_data3),
+                   timer:sleep(10),
+                   timer:sleep(10),
+                   ?assertEqual([{2,cool_data2},{2,cool_data3}],get_log(m1)),
+                   ?assertEqual([{2,cool_data2},{2,cool_data3}],get_log(m2)),
+                   ?assertEqual([{2,cool_data2},{2,cool_data3}],get_log(m3)),
+                   ?assertEqual(2,get_commit_index(m1)),
+                   ?assertEqual(2,get_commit_index(m2)),
+                   ?assertEqual(2,get_commit_index(m3))
+             ])).
 
 %%%%%%%%%%%%%%%%%%%
 %% PART 4: Some logistics (15 points)
