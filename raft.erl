@@ -40,7 +40,7 @@ raft_node(NS) ->
 	    Sender ! {getcommitindex, Name, NS#ns.commitindex};
 	{appendentries, Sender, AppendEntriesArgs} ->
 	    raft_node(raft_node_append_entries(NS, Sender, AppendEntriesArgs));
-	{makeleader, Sender} ->
+	{makeleader, _} ->
 	    raft_node(raft_node_become_leader(NS));
 	{newentry, Sender, NewEntryData} ->
 	    Ourself = self(),
@@ -78,7 +78,6 @@ raft_node_append_entries(NS, Sender, {Term, _, _, _, _}) when Term < NS#ns.term 
 raft_node_append_entries(NS, Sender, {Term, PrevLogIndex, PrevLogTerm, Entries, LeaderCommit}) ->
     % some convenience bindings
     Name = NS#ns.name,
-    CurrentTerm = NS#ns.term,
     % get out prev log term value
     OurPrevLogTerm = if PrevLogIndex == 0 ->
 		            0;
@@ -148,8 +147,6 @@ raft_node_leader_add_entry(NS, NewEntryData) ->
     % prepare entries
     Entries = [{NS#ns.term, NewEntryData}],
     NewLog = NS#ns.log ++ Entries,
-    % get prev log index and term
-    {PrevLogIndex, PrevLogTerm} = helper_compute_prevlogterm(NS#ns.log),
     % send messages to all other peers -> blocking call
     Responses = raft_node_leader_bring_peers_upto_speed(NS, Entries),
     NewNextIndex = lists:map(fun({NI, R}) -> case R of
