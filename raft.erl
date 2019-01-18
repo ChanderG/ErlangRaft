@@ -7,6 +7,7 @@
 	     log = [],
 	     term = 0,
 	     commitindex = 0,
+	     amleader = false,
 	     peers = [],
 	     nextIndex = [] % index of the last acked message on each peer
 	    }).
@@ -43,6 +44,11 @@ raft_node(NS) ->
 	    raft_node(raft_node_become_leader(NS));
 	{newentry, Sender, NewEntryData} ->
 	    raft_node(raft_node_leader_add_entry(NS, NewEntryData))
+    after 30 ->
+	    case NS#ns.amleader of
+		true -> raft_ping(NS);
+		 _ -> true
+	    end
     end,
     raft_node(NS).
 
@@ -82,7 +88,7 @@ raft_node_append_entries(NS, Sender, {Term, PrevLogIndex, PrevLogTerm, Entries, 
 	    % if the previous log entry does not match term recommendation
 	    % note: we still update the term number
 	    Sender ! {appendentries, Name, Term, false},
-	    NS#ns{term=Term};
+	    NS#ns{term=Term, amleader=false};
        true ->
 	    % for now; simply remove trunc existing log to PrevLogIndex
 	    NewLog = lists:sublist(NS#ns.log, PrevLogIndex) ++ Entries,
@@ -92,7 +98,7 @@ raft_node_append_entries(NS, Sender, {Term, PrevLogIndex, PrevLogTerm, Entries, 
 	    % respond positively to caller with updated term
 	    Sender ! {appendentries, Name, Term, true},
 	    % Add the new entries and update term and commitindex
-	    NS#ns{log=NewLog, term=Term, commitindex=NewCommitIndex}
+	    NS#ns{log=NewLog, term=Term, amleader=false, commitindex=NewCommitIndex}
     end.
 
 % helper to manage empty log case
@@ -109,7 +115,7 @@ raft_node_become_leader(NS) ->
 			append_entries(P, NewTerm, PrevLogIndex, PrevLogTerm, [], NS#ns.commitindex)
 		  end, NS#ns.peers),
     NewNextIndex = [PrevLogIndex || _ <- NS#ns.peers],
-    NS#ns{term=NewTerm, nextIndex=NewNextIndex}.
+    NS#ns{term=NewTerm, amleader=true, nextIndex=NewNextIndex}.
 
 leader_bring_peer_upto_speed(P, NextIndexP, NS, Entries) ->
     % contact peer once
@@ -165,6 +171,10 @@ raft_node_leader_add_entry(NS, NewEntryData) ->
 			end, NS#ns.peers),
 	    NS#ns{log=NewLog, commitindex=NewCommitIndex, nextIndex=NewNextIndex}
     end.
+
+% simply send empty entry
+raft_ping(NS)->
+    raft_node_leader_bring_peers_upto_speed(NS, []).
 
 %% In this assignment, we're going to be implmenting part of the Raft
 %% algorythm - a distributed consensious reaching algorithm, designed
@@ -709,18 +719,18 @@ ld_7_test_() ->
 % allows out-of-date followers who re-awaken to be brought back up to
 % date.
 
-%% ld_8_test_() ->
-%%     testme(?_test([disable_member(m3),
-%%                    make_leader(m1),
-%%                    new_entry(m1, cool_data),
-%%                    new_entry(m1, cool_data2),
-%%                    timer:sleep(10),
-%%                    enable_member(m3),
-%%                    timer:sleep(70),
-%%                    ?assertEqual([{1,cool_data},{1,cool_data2}],get_log(m1)),
-%%                    ?assertEqual([{1,cool_data},{1,cool_data2}],get_log(m2)),
-%%                    ?assertEqual([{1,cool_data},{1,cool_data2}],get_log(m3))
-%%              ])).
+ld_8_test_() ->
+    testme(?_test([disable_member(m3),
+                   make_leader(m1),
+                   new_entry(m1, cool_data),
+                   new_entry(m1, cool_data2),
+                   timer:sleep(10),
+                   enable_member(m3),
+                   timer:sleep(70),
+                   ?assertEqual([{1,cool_data},{1,cool_data2}],get_log(m1)),
+                   ?assertEqual([{1,cool_data},{1,cool_data2}],get_log(m2)),
+                   ?assertEqual([{1,cool_data},{1,cool_data2}],get_log(m3))
+             ])).
 
 % Make followers forward new_entry requests to their current leader
 
